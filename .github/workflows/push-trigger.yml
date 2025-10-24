@@ -23,7 +23,7 @@ on:
 
 jobs:
   build-maven-partner:
-    uses: mosip/kattu/.github/workflows/maven-build.yml@master-java21
+    uses: Prafulrakhade/kattu/.github/workflows/maven-build.yml@master-java21
     with:
       SERVICE_LOCATION: ./partner
       BUILD_ARTIFACT: partner
