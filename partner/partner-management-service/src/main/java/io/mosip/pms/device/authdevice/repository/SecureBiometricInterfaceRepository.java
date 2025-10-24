@@ -18,4 +18,13 @@ public interface SecureBiometricInterfaceRepository extends JpaRepository<Secure
 	
 	@Query(value = "select * from  secure_biometric_interface d where d.provider_id = ?1 AND d.sw_version=?2 AND (d.is_deleted is null or d.is_deleted = false)", nativeQuery = true)
 	List<SecureBiometricInterface> findByProviderIdAndSwVersion(String providerId, String swversion);
+
+	@Query(value = "select * from  secure_biometric_interface d where d.provider_id = ?1 AND (d.is_deleted is null or d.is_deleted = false)", nativeQuery = true)
+	List<SecureBiometricInterface> findByProviderId(String providerId);
+	
+	@Query(value = "select * from  secure_biometric_interface d where d.provider_id = ?1 AND (d.is_deleted is null or d.is_deleted = false) AND d.approval_status = 'approved' AND d.is_active = true", nativeQuery = true)
+	List<SecureBiometricInterface> findAllActiveAndApprovedByProviderId(String providerId);
+
+	@Query(value = "select * from  secure_biometric_interface d where (d.is_deleted is null or d.is_deleted = false) AND ((d.approval_status = 'approved' AND d.is_active = true) OR d.approval_status = 'pending_approval')", nativeQuery = true)
+	List<SecureBiometricInterface> findAllApprovedAndPendingSBI();
 }

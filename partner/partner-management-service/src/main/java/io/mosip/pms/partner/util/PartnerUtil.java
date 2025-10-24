@@ -1,15 +1,17 @@
 package io.mosip.pms.partner.util;
 
-import java.io.ByteArrayInputStream;
-import java.security.SecureRandom;
-import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
-import java.util.Base64;
-import java.util.UUID;
 import io.mosip.kernel.core.logger.spi.Logger;
+import io.mosip.pms.common.constant.PartnerConstants;
 import io.mosip.pms.common.util.PMSLogger;
-import io.mosip.pms.partner.constant.ErrorCode;
-import io.mosip.pms.partner.exception.PartnerServiceException;
+import io.mosip.pms.exception.BatchJobServiceException;
+import io.mosip.pms.partner.manager.constant.ErrorCode;
+import org.apache.commons.codec.digest.DigestUtils;
+
+import java.security.SecureRandom;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 
 /**
  * @author sanjeev.shrivastava
@@ -19,9 +21,9 @@ import io.mosip.pms.partner.exception.PartnerServiceException;
 public class PartnerUtil {
 
 	private static final Logger LOGGER = PMSLogger.getLogger(PartnerUtil.class);
-	private static final String BEGIN_CERTIFICATE = "-----BEGIN CERTIFICATE-----";
-	private static final String END_CERTIFICATE = "-----END CERTIFICATE-----";
-	
+
+	public static final String BLANK_STRING = "";
+
 	/**
 	 * @return partnerId.
 	 */
@@ -82,21 +84,45 @@ public class PartnerUtil {
 		return uniqueId.substring(0, length);
 	}
 
-	public static X509Certificate decodeCertificateData(String certificateData) {
-		certificateData = certificateData.replaceAll(BEGIN_CERTIFICATE, "")
-				.replaceAll(END_CERTIFICATE, "")
-				.replaceAll("\n", "");
-		X509Certificate cert = null;
-		try {
-			byte[] decodedCertificate = Base64.getDecoder().decode(certificateData);
+	public static String generateSHA256Hash(String input) {
+		return DigestUtils.sha256Hex(input.toLowerCase());
+	}
 
-			CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
-			cert = (X509Certificate) certificateFactory.generateCertificate(new ByteArrayInputStream(decodedCertificate));
-		} catch (Exception ex) {
-			LOGGER.error("Could not decode the certificate data :" + ex.getMessage());
-			throw new PartnerServiceException(ErrorCode.UNABLE_TO_DECODE_CERTIFICATE.getErrorCode(),
-					ErrorCode.UNABLE_TO_DECODE_CERTIFICATE.getErrorMessage());
+	public static String trimAndReplace(String str) {
+		if (str == null) {
+			return null;
 		}
-		return cert;
+		return str.trim().replaceAll("\\s+", " ");
+	}
+
+	public static String getCertificateName(String subjectDN) {
+		String[] parts = subjectDN.split(",");
+		for (String part : parts) {
+			if (part.trim().startsWith("CN=")) {
+				return part.trim().substring(3);
+			}
+		}
+		return BLANK_STRING;
+	}
+
+	public static void validateApiResponse(Map<String, Object> response, String apiUrl) {
+		if (response == null) {
+			LOGGER.debug("Received null response from API: {}", apiUrl);
+			throw new BatchJobServiceException(ErrorCode.API_NULL_RESPONSE.getErrorCode(),
+					ErrorCode.API_NULL_RESPONSE.getErrorMessage());
+		}
+		if (response.containsKey(PartnerConstants.ERRORS)) {
+			List<Map<String, Object>> errorList = (List<Map<String, Object>>) response.get(PartnerConstants.ERRORS);
+			if (errorList != null && !errorList.isEmpty()) {
+				LOGGER.debug("Error occurred while fetching data: {}", errorList);
+				throw new BatchJobServiceException(String.valueOf(errorList.getFirst().get(PartnerConstants.ERRORCODE)),
+						String.valueOf(errorList.getFirst().get(PartnerConstants.ERRORMESSAGE)));
+			}
+		}
+		if (!response.containsKey(PartnerConstants.RESPONSE) || response.get(PartnerConstants.RESPONSE) == null) {
+			LOGGER.debug("Missing response data in API call: {}", apiUrl);
+			throw new BatchJobServiceException(ErrorCode.API_NULL_RESPONSE.getErrorCode(),
+					ErrorCode.API_NULL_RESPONSE.getErrorMessage());
+		}
 	}
 }

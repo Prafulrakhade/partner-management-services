@@ -1,0 +1,287 @@
+package io.mosip.pms.tasklets.service;
+
+import java.io.StringWriter;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import javax.transaction.Transactional;
+
+import io.mosip.pms.tasklets.util.BatchJobHelper;
+import io.mosip.pms.tasklets.util.KeyManagerHelper;
+import org.apache.velocity.VelocityContext;
+import org.apache.velocity.app.VelocityEngine;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
+import org.springframework.stereotype.Service;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import io.mosip.kernel.core.logger.spi.Logger;
+import io.mosip.pms.common.constant.PartnerConstants;
+import io.mosip.pms.common.dto.CertificateDetailsDto;
+import io.mosip.pms.common.dto.EmailTemplateDto;
+import io.mosip.pms.common.dto.NotificationDetailsDto;
+import io.mosip.pms.common.dto.ApiKeyDetailsDto;
+import io.mosip.pms.common.dto.FtmDetailsDto;
+import io.mosip.pms.common.dto.SbiDetailsDto;
+import io.mosip.pms.common.entity.NotificationEntity;
+import io.mosip.pms.common.repository.NotificationServiceRepository;
+import io.mosip.pms.common.util.PMSLogger;
+import io.mosip.pms.common.util.RestUtil;
+import io.mosip.pms.device.util.AuditUtil;
+import io.mosip.pms.exception.BatchJobServiceException;
+import io.mosip.pms.partner.manager.constant.AuditConstant;
+import io.mosip.pms.partner.manager.constant.ErrorCode;
+import io.mosip.pms.tasklets.util.TemplateHelper;
+
+@Service
+public class EmailNotificationService {
+
+	private Logger log = PMSLogger.getLogger(EmailNotificationService.class);
+
+	@Value("${emailResourse.url}")
+	private String sendEmailUrl;
+
+	@Autowired
+	RestUtil restUtil;
+
+	@Autowired
+	AuditUtil auditUtil;
+
+	@Autowired
+	BatchJobHelper batchJobHelper;
+
+	@Autowired
+	VelocityEngine velocityEngine;
+
+	@Autowired
+	NotificationServiceRepository notificationServiceRepository;
+
+	@Autowired
+	ObjectMapper objectMapper;
+
+	@Autowired
+	TemplateHelper templateHelper;
+
+	@Autowired
+	KeyManagerHelper keyManagerHelper;
+
+	@Transactional
+	public void sendEmailNotification(NotificationEntity notificationEntity, String emailId) {
+		try {
+			log.info("notificationEntity: {}", notificationEntity);
+			if (notificationEntity.getId().isEmpty()) {
+				log.error("No notification found for {}", notificationEntity);
+				return;
+			}
+
+			if (notificationEntity.getEmailSent() && notificationEntity.getEmailSentDatetime() != null) {
+				log.warn("Email notification already sent for ID: {}", notificationEntity.getEmailId());
+				return;
+			}
+
+			EmailTemplateDto templateDto = templateHelper.fetchEmailTemplate(notificationEntity.getEmailLangCode(),
+					notificationEntity.getNotificationType());
+			String populatedTemplate = populateTemplate(templateDto.getBody(), notificationEntity);
+			String populatedSubject = populateSubjectTemplate(templateDto.getSubject(), notificationEntity);
+			sendEmail(notificationEntity, populatedTemplate, populatedSubject, emailId);
+
+			// update notificationEntity status
+			notificationEntity.setEmailSent(true);
+			notificationEntity.setEmailSentDatetime(LocalDateTime.now(ZoneId.of("UTC")));
+			notificationServiceRepository.save(notificationEntity);
+
+			saveAuditLogForEmailSuccess(notificationEntity);
+
+			log.debug("notification status successfully updated for ID: {}", notificationEntity.getId());
+		} catch (BatchJobServiceException e) {
+			saveAuditLogForEmailFailure(notificationEntity);
+			log.error("Failed to send email for notification ID: {} - {}", notificationEntity.getId(), e.getMessage());
+		} catch (Exception e) {
+			saveAuditLogForEmailFailure(notificationEntity);
+			log.error("Unexpected error while sending email for notification ID: {} - {}", notificationEntity.getId(),
+					e.getMessage());
+		}
+	}
+
+	private void saveAuditLogForEmailSuccess(NotificationEntity notificationEntity) {
+		String notificationType = notificationEntity.getNotificationType();
+		auditUtil.setAuditRequestDto(batchJobHelper.getAuditLogEventTypeForEmail(notificationType, true),
+				notificationEntity.getId(), "notificationId", AuditConstant.AUDIT_SYSTEM);
+	}
+
+	private void saveAuditLogForEmailFailure(NotificationEntity notificationEntity) {
+		String notificationType = notificationEntity.getNotificationType();
+		auditUtil.setAuditRequestDto(batchJobHelper.getAuditLogEventTypeForEmail(notificationType, false), "failure",
+				"notificationId", AuditConstant.AUDIT_SYSTEM);
+	}
+
+	private String populateTemplate(String templateContent, NotificationEntity notificationEntity)
+			throws JsonProcessingException {
+		VelocityContext context = createVelocityContext(notificationEntity);
+		StringWriter writer = new StringWriter();
+		velocityEngine.evaluate(context, writer, "logTag", templateContent);
+		return writer.toString();
+	}
+
+	private String populateSubjectTemplate(String subjectTemplate, NotificationEntity notificationEntity)
+			throws JsonProcessingException {
+
+		// Only populate subject template if it's a weekly summary
+		if (PartnerConstants.WEEKLY_SUMMARY_NOTIFICATION_TYPE.equals(notificationEntity.getNotificationType())) {
+			VelocityContext context = new VelocityContext();
+			NotificationDetailsDto notificationDetails = objectMapper
+					.readValue(notificationEntity.getNotificationDetailsJson(), NotificationDetailsDto.class);
+			addWeeklySummaryContext(context, notificationDetails);
+			StringWriter writer = new StringWriter();
+			velocityEngine.evaluate(context, writer, "subjectLogTag", subjectTemplate);
+			return writer.toString().trim();
+		}
+
+		// For all other notification types
+		return subjectTemplate;
+	}
+
+	private VelocityContext createVelocityContext(NotificationEntity notificationEntity)
+			throws JsonProcessingException {
+		VelocityContext context = new VelocityContext();
+		String notificationType = notificationEntity.getNotificationType();
+		NotificationDetailsDto notificationDetails = objectMapper
+				.readValue(notificationEntity.getNotificationDetailsJson(), NotificationDetailsDto.class);
+
+		switch (notificationType) {
+			case PartnerConstants.PARTNER_CERT_EXPIRY_NOTIFICATION_TYPE, PartnerConstants.ROOT_CERT_EXPIRY,
+				 PartnerConstants.INTERMEDIATE_CERT_EXPIRY_NOTIFICATION_TYPE:
+				CertificateDetailsDto cert = notificationDetails.getCertificateDetails().stream().findFirst().orElse(null);
+				if (cert != null) {
+					context.put("partnerId", notificationEntity.getPartnerId());
+					context.put("certificateId", cert.getCertificateId());
+					context.put("expiryDateTime", formatDateTime(cert.getExpiryDateTime()));
+					context.put("partnerDomain", cert.getPartnerDomain());
+					context.put("issuedTo", cert.getIssuedTo());
+					context.put("issuedBy", cert.getIssuedBy());
+				}
+				break;
+			case PartnerConstants.FTM_CHIP_CERT_EXPIRY_NOTIFICATION_TYPE:
+				FtmDetailsDto ftm = notificationDetails.getFtmDetails().stream().findFirst().orElse(null);
+				if (ftm != null) {
+					context.put("ftmId", ftm.getFtmId());
+					context.put("make", ftm.getMake());
+					context.put("model", ftm.getModel());
+					context.put("partnerId", notificationEntity.getPartnerId());
+					context.put("certificateId", ftm.getCertificateId());
+					context.put("expiryDateTime", formatDateTime(ftm.getExpiryDateTime()));
+					context.put("partnerDomain", ftm.getPartnerDomain());
+					context.put("issuedTo", ftm.getIssuedTo());
+					context.put("issuedBy", ftm.getIssuedBy());
+				}
+				break;
+			case PartnerConstants.API_KEY_EXPIRY_NOTIFICATION_TYPE:
+				ApiKeyDetailsDto apiKey = notificationDetails.getApiKeyDetails().stream().findFirst().orElse(null);
+				if (apiKey != null) {
+					context.put("apiKeyName", apiKey.getApiKeyName());
+					context.put("partnerId", notificationEntity.getPartnerId());
+					context.put("partnerDomain", "AUTH");
+					context.put("expiryDateTime", formatDateTime(apiKey.getExpiryDateTime()));
+					context.put("expiryPeriod", apiKey.getExpiryPeriod());
+					context.put("policyGroup", apiKey.getPolicyGroup());
+					context.put("policyName", apiKey.getPolicyName());
+				}
+				break;
+			case PartnerConstants.SBI_EXPIRY_NOTIFICATION_TYPE:
+				SbiDetailsDto sbi = notificationDetails.getSbiDetails().stream().findFirst().orElse(null);
+				if (sbi != null) {
+					context.put("sbiId", sbi.getSbiId());
+					context.put("sbiVersion", sbi.getSbiVersion());
+					context.put("sbiBinaryHash", sbi.getSbiBinaryHash());
+					context.put("sbiCreationDate", formatDateTime(sbi.getSbiCreationDate()));
+					context.put("expiryDateTime", formatDateTime(sbi.getExpiryDateTime()));
+					context.put("partnerId", notificationEntity.getPartnerId());
+					context.put("expiryPeriod", sbi.getExpiryPeriod());
+				}
+				break;
+			case PartnerConstants.WEEKLY_SUMMARY_NOTIFICATION_TYPE:
+				LocalDate createdDate = notificationEntity.getCreatedDatetime().toLocalDate();
+				DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd-MM-yyyy");
+
+				context.put("partnerId", notificationEntity.getPartnerId());
+				context.put("fromDate", createdDate.format(formatter));
+				context.put("toDate", createdDate.plusDays(7).format(formatter));
+
+				addWeeklySummaryContext(context, notificationDetails);
+				break;
+
+			default:
+				log.error("Invalid Notification Type: {}", notificationEntity.getNotificationType());
+				throw new BatchJobServiceException(ErrorCode.INVALID_NOTIFICATION_TYPE.getErrorCode(),
+						ErrorCode.INVALID_NOTIFICATION_TYPE.getErrorMessage());
+		}
+
+		return context;
+	}
+
+	private void addWeeklySummaryContext(VelocityContext context, NotificationDetailsDto notificationDetails) {
+		List<CertificateDetailsDto> certificateDetails = Optional.ofNullable(notificationDetails.getCertificateDetails())
+				.orElse(Collections.emptyList());
+		List<FtmDetailsDto> ftmDetails = Optional.ofNullable(notificationDetails.getFtmDetails())
+				.orElse(Collections.emptyList());
+		List<ApiKeyDetailsDto> apiKeyDetails = Optional.ofNullable(notificationDetails.getApiKeyDetails())
+				.orElse(Collections.emptyList());
+		List<SbiDetailsDto> sbiDetails = Optional.ofNullable(notificationDetails.getSbiDetails())
+				.orElse(Collections.emptyList());
+
+		context.put("partnerCertificateCount", certificateDetails.size());
+		context.put("ftmChipCertificateCount", ftmDetails.size());
+		context.put("apiKeyCount", apiKeyDetails.size());
+		context.put("sbiCount", sbiDetails.size());
+		context.put("certificateDetails", certificateDetails);
+		context.put("ftmDetails", ftmDetails);
+		context.put("apiKeyDetails", apiKeyDetails);
+		context.put("sbiDetails", sbiDetails);
+	}
+
+	private void sendEmail(NotificationEntity notificationEntity, String emailTemplate, String emailSubject,
+			String emailId) {
+		try {
+			MultiValueMap<String, Object> requestBody = new LinkedMultiValueMap<>();
+
+			log.debug("emailId {}", emailId);
+			requestBody.add("mailTo", emailId);
+			requestBody.add("mailSubject", emailSubject);
+			requestBody.add("mailContent", emailTemplate);
+
+			// Send email request
+			restUtil.postApi(sendEmailUrl, null, "", "", MediaType.MULTIPART_FORM_DATA, requestBody, Map.class);
+			log.info("Email sent successfully for notification ID: {}", notificationEntity.getId());
+		} catch (BatchJobServiceException e) {
+			log.error("Error while sending email for notification ID: {} - {}", notificationEntity.getId(),
+					e.getMessage());
+			throw e;
+		} catch (Exception e) {
+			log.error("Unexpected error while sending email for notification ID: {}", notificationEntity.getId());
+			throw new BatchJobServiceException(ErrorCode.EMAIL_SEND_FAILED.getErrorCode(),
+					ErrorCode.EMAIL_SEND_FAILED.getErrorMessage());
+		}
+	}
+
+	public static String formatDateTime(String dateTimeString) {
+		try {
+			LocalDateTime dateTime = LocalDateTime.parse(dateTimeString);
+			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd-MM-yyyy'T'HH:mm:ss");
+			return dateTime.format(formatter);
+		} catch (Exception e) {
+			return dateTimeString;  // fallback
+		}
+	}
+}

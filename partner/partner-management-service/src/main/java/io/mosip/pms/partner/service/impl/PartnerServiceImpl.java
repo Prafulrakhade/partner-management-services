@@ -8,6 +8,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -21,7 +22,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
-import io.mosip.pms.partner.util.MultiPartnerHelper;
+import io.mosip.kernel.core.authmanager.authadapter.model.AuthUserDetails;
+import io.mosip.pms.common.response.dto.ResponseWrapperV2;
+import io.mosip.pms.partner.dto.*;
+import io.mosip.pms.partner.util.MultiPartnerUtil;
+import io.mosip.pms.partner.util.PartnerHelper;
+import io.mosip.pms.tasklets.util.KeyManagerHelper;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
@@ -31,6 +37,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.data.domain.Page;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.LinkedMultiValueMap;
@@ -55,6 +62,7 @@ import io.mosip.pms.common.dto.PolicyRequestSearchResponseDto;
 import io.mosip.pms.common.dto.SearchDto;
 import io.mosip.pms.common.dto.SearchFilter;
 import io.mosip.pms.common.dto.Type;
+import io.mosip.pms.common.dto.OriginalCertDownloadResponseDto;
 import io.mosip.pms.common.entity.AuthPolicy;
 import io.mosip.pms.common.entity.BiometricExtractorProvider;
 import io.mosip.pms.common.entity.Partner;
@@ -82,7 +90,7 @@ import io.mosip.pms.common.repository.PartnerServiceRepository;
 import io.mosip.pms.common.repository.PartnerTypeRepository;
 import io.mosip.pms.common.repository.PolicyGroupRepository;
 import io.mosip.pms.common.request.dto.RequestWrapper;
-import io.mosip.pms.common.response.dto.NotificationDto;
+import io.mosip.pms.common.dto.NotificationDto;
 import io.mosip.pms.common.service.NotificatonService;
 import io.mosip.pms.common.util.MapperUtils;
 import io.mosip.pms.common.util.PMSLogger;
@@ -94,11 +102,8 @@ import io.mosip.pms.device.response.dto.ColumnCodeValue;
 import io.mosip.pms.device.response.dto.FilterResponseCodeDto;
 import io.mosip.pms.device.util.AuditUtil;
 import io.mosip.pms.partner.constant.ErrorCode;
-import io.mosip.pms.partner.constant.PartnerConstants;
+import io.mosip.pms.common.constant.PartnerConstants;
 import io.mosip.pms.partner.constant.PartnerServiceAuditEnum;
-import io.mosip.pms.partner.dto.DataShareResponseDto;
-import io.mosip.pms.partner.dto.PartnerPolicyMappingResponseDto;
-import io.mosip.pms.partner.dto.UploadCertificateRequestDto;
 import io.mosip.pms.partner.exception.PartnerServiceException;
 import io.mosip.pms.partner.request.dto.AddContactRequestDto;
 import io.mosip.pms.partner.request.dto.CACertificateRequestDto;
@@ -114,16 +119,18 @@ import io.mosip.pms.partner.request.dto.PartnerRequestDto;
 import io.mosip.pms.partner.request.dto.PartnerSearchDto;
 import io.mosip.pms.partner.request.dto.PartnerUpdateDto;
 import io.mosip.pms.partner.request.dto.PartnerUpdateRequest;
+import io.mosip.pms.partner.request.dto.PartnerExistsRequestDto;
+import io.mosip.pms.partner.response.dto.PartnerExistsResponseDto;
 import io.mosip.pms.partner.response.dto.APIkeyRequests;
 import io.mosip.pms.partner.response.dto.CACertificateResponseDto;
 import io.mosip.pms.partner.response.dto.EmailVerificationResponseDto;
-import io.mosip.pms.partner.response.dto.PartnerCertDownloadResponeDto;
+import io.mosip.pms.common.dto.PartnerCertDownloadResponeDto;
+import io.mosip.pms.common.dto.SearchSort;
 import io.mosip.pms.partner.response.dto.PartnerCertificateResponseDto;
 import io.mosip.pms.partner.response.dto.PartnerCredentialTypePolicyDto;
 import io.mosip.pms.partner.response.dto.PartnerResponse;
 import io.mosip.pms.partner.response.dto.PartnerSearchResponseDto;
 import io.mosip.pms.partner.response.dto.RetrievePartnerDetailsResponse;
-import io.mosip.pms.partner.response.dto.OriginalCertDownloadResponseDto;
 import io.mosip.pms.partner.service.PartnerService;
 import io.mosip.pms.partner.util.PartnerUtil;
 
@@ -142,6 +149,24 @@ public class PartnerServiceImpl implements PartnerService {
 	private final static String LINE_SEPARATOR = "\n";
 
 	public static final String BLANK_STRING="";
+
+	public static final String VERSION = "1.0";
+
+	private static final String FTM = "FTM";
+
+	private static final String APPROVED = "approved";
+
+	public static final String ACTIVE = "ACTIVE";
+
+	public static final String INACTIVE = "INACTIVE";
+
+	public static final String AUTH_PARTNER = "Auth_Partner";
+
+	private static final String CONTACT_NO = "contactNo";
+
+	private static final String EMAIL_ID = "emailId";
+
+	private static final String ADDRESS = "address";
 
 	@Autowired
 	PartnerServiceRepository partnerRepository;
@@ -200,11 +225,14 @@ public class PartnerServiceImpl implements PartnerService {
 	@Autowired
 	private NotificatonService notificationService;
 
+	@Autowired
+	PartnerHelper partnerHelper;
+
+	@Autowired
+	KeyManagerHelper keyManagerHelper;
+
 	@Value("${pmp.partner.partnerId.max.length}")
 	private int partnerIdMaxLength;
-
-	@Value("${mosip.pmp.partner.policy.expiry.period.indays}")
-	private int partnerPolicyExpiryInDays;
 
 	@Value("${pmp.partner.valid.email.address.regex}")
 	private String emailRegex;
@@ -230,32 +258,43 @@ public class PartnerServiceImpl implements PartnerService {
 	@Value("${mosip.optional-languages}")
 	private String optionalLanguges;
 
-	@Autowired
-	AuditUtil auditUtil;
+	@Value("${mosip.pms.api.id.original.partner.certificate.get}")
+	private String getOriginalPartnerCertificateId;
+
+	@Value("${mosip.pms.api.id.partner.certificates.get}")
+	private String getPartnerCertificatesId;
+
+	@Value("${mosip.pms.api.id.auth.partner.api.keys.get}")
+	private String getAuthPartnerApiKeysId;
+
+	@Value("${mosip.pms.api.id.partners.v3.get}")
+	private String getPartnersV3Id;
+
+	@Value("${mosip.pms.id.generation.max.retries}")
+	private int maxRetries;
+
+	@Value("${mosip.pms.api.id.create.partner.post}")
+	private String postCreatePartnerId;
+
+	@Value("${mosip.pms.api.id.partner.exists.post}")
+	private String postPartnerExistsId;
 
 	@Autowired
-	MultiPartnerHelper multiPartnerHelper;
+	AuditUtil auditUtil;
 
 	@Value("${pmp.partner.mobileNumber.max.length:16}")
 	private int maxMobileNumberLength;
 
 	private String emptySpacesRegex = ".*\\s.*";
-	
+
 	@Override
 	public PartnerResponse registerPartner(PartnerRequestDto request) {
-		// Registered partner cannot create another partner 
 		String loggedInUserEmail = getLoggedInUserEmail();
 		if(loggedInUserEmail != null && isPartnerExistsWithEmail(loggedInUserEmail).getEmailExists()) {
 			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(),
 					"partnerId");
 			throw new PartnerServiceException(ErrorCode.LOGGEDIN_USER_NOT_AUTHORIZED.getErrorCode(),
 					ErrorCode.LOGGEDIN_USER_NOT_AUTHORIZED.getErrorMessage());
-		}
-		if (!validateMobileNumeber(request.getContactNumber())) {
-			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(),
-					"partnerId");
-			throw new PartnerServiceException(ErrorCode.INVALID_MOBILE_NUMBER_EXCEPTION.getErrorCode(),
-					ErrorCode.INVALID_MOBILE_NUMBER_EXCEPTION.getErrorMessage() + maxMobileNumberLength);
 		}
 
 		if (!validateEmail(request.getEmailId())) {
@@ -264,18 +303,6 @@ public class PartnerServiceImpl implements PartnerService {
 			throw new PartnerServiceException(ErrorCode.INVALID_EMAIL_ID_EXCEPTION.getErrorCode(),
 					ErrorCode.INVALID_EMAIL_ID_EXCEPTION.getErrorMessage());
 		}
-		if(isInputStringContainsSpaces(request.getPartnerId())) {
-			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(),
-					"partnerId");
-			throw new PartnerServiceException(ErrorCode.PARTNER_ID_CONTAINS_SPACES.getErrorCode(),
-					ErrorCode.PARTNER_ID_CONTAINS_SPACES.getErrorMessage() + partnerIdMaxLength);
-		}		
-		if (!validatePartnerIdLength(request.getPartnerId())) {
-			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(),
-					"partnerId");
-			throw new PartnerServiceException(ErrorCode.PARTNER_ID_LENGTH_EXCEPTION.getErrorCode(),
-					ErrorCode.PARTNER_ID_LENGTH_EXCEPTION.getErrorMessage() + partnerIdMaxLength);
-		}
 
 		if (!validatePartnerByEmail(request.getEmailId())) {
 			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(),
@@ -283,46 +310,83 @@ public class PartnerServiceImpl implements PartnerService {
 			throw new PartnerServiceException(ErrorCode.EMAIL_ALREADY_EXISTS_EXCEPTION.getErrorCode(),
 					ErrorCode.EMAIL_ALREADY_EXISTS_EXCEPTION.getErrorMessage());
 		}
-		if (request.getLangCode() != null && !getSystemSupportedLanguageCodes().contains(request.getLangCode())) {
-			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(),
-					"partnerId");
-			throw new PartnerServiceException(ErrorCode.PARTNER_LANG_CODE_NOT_SUPPORTED.getErrorCode(),
-					ErrorCode.PARTNER_LANG_CODE_NOT_SUPPORTED.getErrorMessage());
-		}else {
+
+		return validateAndSavePartner(request);
+	}
+
+	private PartnerResponse validateAndSavePartner(PartnerRequestDto request) {
+
+		// validate mobile
+		if (!validateMobileNumeber(request.getContactNumber())) {
+			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(), "partnerId");
+			throw new PartnerServiceException(ErrorCode.INVALID_MOBILE_NUMBER_EXCEPTION.getErrorCode(),
+					ErrorCode.INVALID_MOBILE_NUMBER_EXCEPTION.getErrorMessage() + maxMobileNumberLength);
+		}
+
+		// validate partnerId spacing
+		if (isInputStringContainsSpaces(request.getPartnerId())) {
+			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(), "partnerId");
+			throw new PartnerServiceException(ErrorCode.PARTNER_ID_CONTAINS_SPACES.getErrorCode(),
+					ErrorCode.PARTNER_ID_CONTAINS_SPACES.getErrorMessage());
+		}
+
+		// validate partnerId length
+		if (!validatePartnerIdLength(request.getPartnerId())) {
+			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(), "partnerId");
+			throw new PartnerServiceException(ErrorCode.PARTNER_ID_LENGTH_EXCEPTION.getErrorCode(),
+					ErrorCode.PARTNER_ID_LENGTH_EXCEPTION.getErrorMessage() + partnerIdMaxLength);
+		}
+
+		// validate language code
+		if (request.getLangCode() != null) {
+			if (!getSystemSupportedLanguageCodes().contains(request.getLangCode())) {
+				auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(), "partnerId");
+				throw new PartnerServiceException(ErrorCode.PARTNER_LANG_CODE_NOT_SUPPORTED.getErrorCode(),
+						ErrorCode.PARTNER_LANG_CODE_NOT_SUPPORTED.getErrorMessage());
+			}
+		} else {
 			request.setLangCode(getSystemSupportedLanguageCodes().get(0));
 		}
+
+		// validate partnerId uniqueness
 		if (!validatePartnerId(request.getPartnerId())) {
-			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(),
-					"partnerId");
+			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, request.getPartnerId(), "partnerId");
 			throw new PartnerServiceException(ErrorCode.PARTNER_ALREADY_REGISTERED_WITH_ID_EXCEPTION.getErrorCode(),
 					ErrorCode.PARTNER_ALREADY_REGISTERED_WITH_ID_EXCEPTION.getErrorMessage());
 		}
-		
-		if(request.getAdditionalInfo() != null) {
+
+		// validate additional info JSON
+		if (request.getAdditionalInfo() != null) {
 			isJSONValid(request.getAdditionalInfo().toString());
 		}
-		
+
+		// validate partner type and policy group
 		PartnerType partnerType = validateAndGetPartnerType(request.getPartnerType());
 		PolicyGroup policyGroup = null;
-		if (partnerType.getIsPolicyRequired() &&  (request.getPolicyGroup()==null||request.getPolicyGroup().isEmpty())) {
-			LOGGER.error("Policy Group is mandatory for "+partnerType.getCode());
+		if (partnerType.getIsPolicyRequired() && (request.getPolicyGroup() == null || request.getPolicyGroup().isEmpty())) {
+			LOGGER.error("Policy Group is mandatory for " + partnerType.getCode());
 			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE);
 			throw new PartnerServiceException(ErrorCode.POLICY_GROUP_IS_MANDATORY.getErrorCode(),
-					String.format(ErrorCode.POLICY_GROUP_IS_MANDATORY.getErrorMessage(),partnerType.getCode()));
+					String.format(ErrorCode.POLICY_GROUP_IS_MANDATORY.getErrorMessage(), partnerType.getCode()));
 		}
-		if(request.getPolicyGroup()!=null && !request.getPolicyGroup().isEmpty()) {
+		if (request.getPolicyGroup() != null && !request.getPolicyGroup().isEmpty()) {
 			policyGroup = validateAndGetPolicyGroupByName(request.getPolicyGroup());
 		}
-		Partner partner = mapPartnerFromRequest(request, policyGroup, partnerType.getCode());		
+
+		// map Partner
+		Partner partner = mapPartnerFromRequest(request, policyGroup, partnerType.getCode());
 		partner.setPartnerTypeCode(partnerType.getCode());
+
 		partnerRepository.save(partner);
 		saveToPartnerH(partner);
+
 		PartnerResponse partnerResponse = new PartnerResponse();
 		partnerResponse.setPartnerId(partner.getId());
 		partnerResponse.setStatus(partner.getApprovalStatus());
+
 		sendNotifications(EventType.PARTNER_REGISTRED, partner);
-		auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_SUCCESS, request.getPartnerId(),
-				"partnerId");
+		auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_SUCCESS, request.getPartnerId(), "partnerId");
+
 		return partnerResponse;
 	}
 
@@ -339,6 +403,7 @@ public class PartnerServiceImpl implements PartnerService {
 		partnerHistory.setPartnerTypeCode(partner.getPartnerTypeCode());
 		partnerHistory.setApprovalStatus(partner.getApprovalStatus());
 		partnerHistory.setEmailId(partner.getEmailId());
+		partnerHistory.setEmailIdHash(partner.getEmailIdHash());
 		partnerHistory.setIsActive(partner.getIsActive());
 		partnerHistory.setIsDeleted(partner.getIsDeleted());
 		partnerHistory.setUserId(partner.getUserId());
@@ -355,10 +420,11 @@ public class PartnerServiceImpl implements PartnerService {
 		partner.setId(request.getPartnerId());
 		partner.setPolicyGroupId(policyGroup != null ? policyGroup.getId() : null);
 		partner.setName(request.getOrganizationName());
-		partner.setAddress(request.getAddress());
-		partner.setContactNo(request.getContactNumber());
+		partner.setAddress(keyManagerHelper.encryptData(request.getAddress()));
+		partner.setContactNo(keyManagerHelper.encryptData(request.getContactNumber()));
 		partner.setPartnerTypeCode(partnerType);
-		partner.setEmailId(request.getEmailId());
+		partner.setEmailId(keyManagerHelper.encryptData(request.getEmailId()));
+		partner.setEmailIdHash(PartnerUtil.generateSHA256Hash(request.getEmailId()));
 		partner.setPartnerTypeCode(partnerType);
 		partner.setIsActive(false);
 		partner.setIsDeleted(false);
@@ -403,9 +469,16 @@ public class PartnerServiceImpl implements PartnerService {
 	}
 
 	private boolean validatePartnerByEmail(String emailId) {
-		Partner partnerFromDb = partnerRepository.findByEmailId(emailId);
+		String emailHash = PartnerUtil.generateSHA256Hash(emailId);
+
+		Partner partnerFromDb = partnerRepository.findByEmailIdHash(emailHash);
+		if (partnerFromDb == null) {
+			// Fallback: check plain email (backward compatibility)
+			partnerFromDb = partnerRepository.findByEmailId(emailId);
+		}
+
 		if (partnerFromDb != null) {
-			LOGGER.error("Partner with email " + emailId + "already exists.");
+			LOGGER.error("Partner with email " + emailId + " already exists.");
 			return false;
 		}
 		return true;
@@ -460,9 +533,14 @@ public class PartnerServiceImpl implements PartnerService {
 		RetrievePartnerDetailsResponse response = new RetrievePartnerDetailsResponse();
 		Partner partner = getValidPartner(partnerId, true);
 		response.setPartnerID(partner.getId());
-		response.setAddress(partner.getAddress());
-		response.setContactNumber(partner.getContactNo());
-		response.setEmailId(partner.getEmailId());
+		// check if the data is encrypted
+		boolean isEncrypted = partner.getEmailIdHash() != null;
+		response.setContactNumber(
+				isEncrypted ? keyManagerHelper.decryptData(partner.getContactNo()) : partner.getContactNo());
+		response.setEmailId(
+				isEncrypted ? keyManagerHelper.decryptData(partner.getEmailId()) : partner.getEmailId());
+		response.setAddress(
+				isEncrypted ? keyManagerHelper.decryptData(partner.getAddress()) : partner.getAddress());
 		response.setOrganizationName(partner.getName());
 		response.setPartnerType(partner.getPartnerTypeCode());
 		response.setStatus(partner.getIsActive() == true ? PartnerConstants.ACTIVE : PartnerConstants.DEACTIVE);
@@ -512,8 +590,12 @@ public class PartnerServiceImpl implements PartnerService {
 		if(partnerUpdateRequest.getAdditionalInfo() != null) {
 			isJSONValid(partnerUpdateRequest.getAdditionalInfo().toString());
 		}
-		partner.setAddress(partnerUpdateRequest.getAddress());
-		partner.setContactNo(partnerUpdateRequest.getContactNumber());
+		if (Objects.isNull(partner.getEmailIdHash())){
+			partner.setEmailIdHash(PartnerUtil.generateSHA256Hash(partner.getEmailId()));
+			partner.setEmailId(keyManagerHelper.encryptData(partner.getEmailId()));
+		}
+		partner.setAddress(keyManagerHelper.encryptData(partnerUpdateRequest.getAddress()));
+		partner.setContactNo(keyManagerHelper.encryptData(partnerUpdateRequest.getContactNumber()));
 		partner.setAdditionalInfo(partnerUpdateRequest.getAdditionalInfo()== null ? "[]" : partnerUpdateRequest.getAdditionalInfo().toString());
 		partner.setLogoUrl(partnerUpdateRequest.getLogoUrl());
 		partner.setUpdBy(getLoggedInUserId());
@@ -613,11 +695,18 @@ public class PartnerServiceImpl implements PartnerService {
 					ErrorCode.INVALID_MOBILE_NUMBER_EXCEPTION.getErrorMessage() + maxMobileNumberLength);
 		}
 
-		PartnerContact contactsFromDb = partnerContactRepository.findByPartnerAndEmail(partnerId, request.getEmailId());
+		PartnerContact contactsFromDb = partnerContactRepository.findByPartnerAndEmailIdHash(partnerId, PartnerUtil.generateSHA256Hash(request.getEmailId()));
+		if (Objects.isNull(contactsFromDb)){
+			contactsFromDb = partnerContactRepository.findByPartnerAndEmailId(partnerId, request.getEmailId());
+		}
 		String resultMessage;
 		if (contactsFromDb != null) {
-			contactsFromDb.setAddress(request.getAddress());
-			contactsFromDb.setContactNo(request.getContactNumber());
+			if (Objects.isNull(contactsFromDb.getEmailIdHash())){
+				contactsFromDb.setEmailIdHash(PartnerUtil.generateSHA256Hash(contactsFromDb.getEmailId()));
+				contactsFromDb.setEmailId(keyManagerHelper.encryptData(contactsFromDb.getEmailId()));
+			}
+			contactsFromDb.setAddress(keyManagerHelper.encryptData(request.getAddress()));
+			contactsFromDb.setContactNo(keyManagerHelper.encryptData(request.getContactNumber()));
 			contactsFromDb.setIsActive(request.getIs_Active());
 			contactsFromDb.setUpdBy(getLoggedInUserId());
 			contactsFromDb.setUpdDtimes(LocalDateTime.now());
@@ -625,13 +714,32 @@ public class PartnerServiceImpl implements PartnerService {
 		} else {
 			Partner partnerFromDb = getValidPartner(partnerId, false);
 			contactsFromDb = new PartnerContact();
-			contactsFromDb.setId(PartnerUtil.createPartnerId());
-			contactsFromDb.setAddress(request.getAddress());
-			contactsFromDb.setContactNo(request.getContactNumber());
+
+			String id = PartnerUtil.createPartnerId();
+			int attempts = 0;
+
+			// Keep generating new Partner Conatact ID until a unique one is found or maxRetries is reached
+			while (partnerContactRepository.existsById(id)) {
+				if (attempts >= maxRetries) {
+					LOGGER.error("Failed to generate unique {} (field: '{}') for entity '{}' after {} attempts", "Partner Contact ID",
+							"id", contactsFromDb.getClass().getSimpleName(), maxRetries);
+					auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.ADD_CONTACTS_FAILURE, partnerId, "partnerId");
+					throw new PartnerServiceException(
+							ErrorCode.UNABLE_TO_GENERATE_UNIQUE_ID.getErrorCode(),
+							String.format(ErrorCode.UNABLE_TO_GENERATE_UNIQUE_ID.getErrorMessage(), "Partner Contact ID", "id", contactsFromDb.getClass().getSimpleName(), maxRetries)
+					);
+				}
+				id = PartnerUtil.createPartnerId();
+				attempts++;
+			}
+			contactsFromDb.setId(id);
+			contactsFromDb.setAddress(keyManagerHelper.encryptData(request.getAddress()));
+			contactsFromDb.setContactNo(keyManagerHelper.encryptData(request.getContactNumber()));
 			contactsFromDb.setCrBy(getLoggedInUserId());
 			contactsFromDb.setCrDtimes(LocalDateTime.now());
 			contactsFromDb.setPartner(partnerFromDb);
-			contactsFromDb.setEmailId(request.getEmailId());
+			contactsFromDb.setEmailIdHash(PartnerUtil.generateSHA256Hash(request.getEmailId()));
+			contactsFromDb.setEmailId(keyManagerHelper.encryptData(request.getEmailId()));
 			contactsFromDb.setIsActive(request.getIs_Active());
 			contactsFromDb.setIsDeleted(false);
 			resultMessage = "Contacts details added successfully.";
@@ -737,7 +845,9 @@ public class PartnerServiceImpl implements PartnerService {
 			throw new PartnerServiceException(ErrorCode.P7B_CERTDATA_ERROR.getErrorCode(),
 					ErrorCode.P7B_CERTDATA_ERROR.getErrorMessage());
 		}
-		uploadOtherDomainCertificate(signedPartnerCert, partnerCertRequesteDto.getPartnerId());
+		if (!partnerCertRequesteDto.getPartnerDomain().equals(FTM)){
+			uploadOtherDomainCertificate(signedPartnerCert, partnerCertRequesteDto.getPartnerId());
+		}
 		Partner updateObject = partner;
 		updateObject.setUpdBy(getLoggedInUserId());
 		updateObject.setUpdDtimes(Timestamp.valueOf(LocalDateTime.now()));
@@ -801,35 +911,108 @@ public class PartnerServiceImpl implements PartnerService {
 		}
 	}
 
-	@SuppressWarnings("unchecked")
 	@Override
-	public PartnerCertDownloadResponeDto getPartnerCertificate(PartnerCertDownloadRequestDto certDownloadRequestDto)
-			throws JsonParseException, JsonMappingException, JsonProcessingException, IOException {
-		return multiPartnerHelper.getCertificateFromKeyMgr(certDownloadRequestDto, "pmp.partner.certificaticate.get.rest.uri", PartnerCertDownloadResponeDto.class);
+	public PartnerCertDownloadResponeDto getPartnerCertificate(PartnerCertDownloadRequestDto certDownloadRequestDto) throws JsonProcessingException {
+		// Fetch partner from DB
+		Optional<Partner> partnerFromDb = getPartner(certDownloadRequestDto);
+		Partner partner = partnerFromDb.get();
+		validateCertificateAlias(certDownloadRequestDto, partner);
+
+		// Retrieve the certificate
+		return partnerHelper.getCertificate(partner.getCertificateAlias(),
+				"pmp.partner.certificaticate.get.rest.uri", PartnerCertDownloadResponeDto.class);
+	}
+
+	private Optional<Partner> getPartner(PartnerCertDownloadRequestDto certDownloadRequestDto) {
+		Optional<Partner> partnerFromDb = partnerRepository.findById(certDownloadRequestDto.getPartnerId());
+		if (partnerFromDb.isEmpty()) {
+			LOGGER.error("Partner not found with id {}", certDownloadRequestDto.getPartnerId());
+			throw new PartnerServiceException(ErrorCode.PARTNER_DOES_NOT_EXIST_EXCEPTION.getErrorCode(),
+					ErrorCode.PARTNER_DOES_NOT_EXIST_EXCEPTION.getErrorMessage());
+		}
+		return partnerFromDb;
 	}
 
 	@Override
-	public OriginalCertDownloadResponseDto getOriginalPartnerCertificate(PartnerCertDownloadRequestDto certDownloadRequestDto)
-			throws JsonParseException, JsonMappingException, JsonProcessingException, IOException {
-		OriginalCertDownloadResponseDto responseDto = multiPartnerHelper.getCertificateFromKeyMgr(certDownloadRequestDto, "pmp.partner.original.certificate.get.rest.uri", OriginalCertDownloadResponseDto.class);
-		responseDto.setIsMosipSignedCertificateExpired(false);
-		responseDto.setIsCaSignedCertificateExpired(false);
-		LocalDateTime currentDateTime = LocalDateTime.now(ZoneId.of("UTC"));
-		// Check mosip signed certificate expiry date
-		X509Certificate decodedMosipSignedCert = PartnerUtil.decodeCertificateData(responseDto.getMosipSignedCertificateData());
-		LocalDateTime mosipSignedCertExpiryDate = decodedMosipSignedCert.getNotAfter().toInstant().atZone(ZoneId.of("UTC")).toLocalDateTime();
-		if (mosipSignedCertExpiryDate.isBefore(currentDateTime)) {
-			responseDto.setMosipSignedCertificateData("");
-			responseDto.setIsMosipSignedCertificateExpired(true);
+	public ResponseWrapperV2<OriginalCertDownloadResponseDto> getPartnerCertificateData(PartnerCertDownloadRequestDto certDownloadRequestDto) {
+		ResponseWrapperV2<OriginalCertDownloadResponseDto> responseWrapper = new ResponseWrapperV2<>();
+		try {
+			validateUser(certDownloadRequestDto);
+
+			// Fetch partner from DB
+			Optional<Partner> partnerFromDb = getPartner(certDownloadRequestDto);
+			Partner partner = partnerFromDb.get();
+			validateCertificateAlias(certDownloadRequestDto, partner);
+
+			// Check if the partner is deactivated
+			if (partner.getApprovalStatus().equals(APPROVED) && !partner.getIsActive()) {
+				throw new PartnerServiceException(ErrorCode.DEACTIVATED_PARTNER_CERTIFICATE_DOWNLOAD_ERROR.getErrorCode(),
+						ErrorCode.DEACTIVATED_PARTNER_CERTIFICATE_DOWNLOAD_ERROR.getErrorMessage());
+			}
+
+			// Retrieve the certificate
+			OriginalCertDownloadResponseDto responseDto = partnerHelper.getCertificate(partner.getCertificateAlias(),
+					"pmp.partner.original.certificate.get.rest.uri", OriginalCertDownloadResponseDto.class);
+
+			// Populate certificate expiry state
+			partnerHelper.populateCertificateExpiryState(responseDto);
+			responseWrapper.setResponse(responseDto);
+		} catch (ApiAccessibleException ex) {
+			LOGGER.info("sessionId", "idType", "id", "In getOriginalPartnerCertificate method - " + ex.getMessage());
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(ex.getErrorCode(), ex.getErrorText()));
+		} catch (PartnerServiceException ex) {
+			LOGGER.info("sessionId", "idType", "id", "In getOriginalPartnerCertificate method - " + ex.getMessage());
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(ex.getErrorCode(), ex.getErrorText()));
+		} catch (Exception ex) {
+			LOGGER.error("sessionId", "idType", "id", "In getOriginalPartnerCertificate method - " + ex.getMessage(), ex);
+			String errorCode = ErrorCode.CERTIFICATE_FETCH_ERROR.getErrorCode();
+			String errorMessage = ErrorCode.CERTIFICATE_FETCH_ERROR.getErrorMessage();
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(errorCode, errorMessage));
 		}
-		// Check ca signed partner certificate expiry date
-		X509Certificate decodedCaSignedCert = PartnerUtil.decodeCertificateData(responseDto.getCaSignedCertificateData());
-		LocalDateTime caSignedCertExpiryDate = decodedCaSignedCert.getNotAfter().toInstant().atZone(ZoneId.of("UTC")).toLocalDateTime();
-		if (caSignedCertExpiryDate.isBefore(currentDateTime)) {
-			responseDto.setCaSignedCertificateData("");
-			responseDto.setIsCaSignedCertificateExpired(true);
+		responseWrapper.setId(getOriginalPartnerCertificateId);
+		responseWrapper.setVersion(VERSION);
+		return responseWrapper;
+	}
+
+	private void validateCertificateAlias(PartnerCertDownloadRequestDto certDownloadRequestDto, Partner partner) {
+		// Check if certificate alias exists
+		if (partner.getCertificateAlias() == null || partner.getCertificateAlias().isEmpty()) {
+			LOGGER.error("Certificate not uploaded for partner {}", certDownloadRequestDto.getPartnerId());
+			throw new PartnerServiceException(ErrorCode.CERTIFICATE_NOT_UPLOADED_EXCEPTION.getErrorCode(),
+					ErrorCode.CERTIFICATE_NOT_UPLOADED_EXCEPTION.getErrorMessage());
 		}
-		return responseDto;
+	}
+
+	private void validateUser(PartnerCertDownloadRequestDto certDownloadRequestDto) {
+		String userId = getUserId();
+
+		// Check if user ID exists in pms
+		List<Partner> partnerList = partnerRepository.findByUserId(userId);
+		if (partnerList.isEmpty()) {
+			LOGGER.error("sessionId", "idType", "id", "User id does not exist.");
+			throw new PartnerServiceException(ErrorCode.USER_ID_NOT_EXISTS.getErrorCode(),
+					ErrorCode.USER_ID_NOT_EXISTS.getErrorMessage());
+		}
+
+		// Check if the user is an admin
+		boolean isAdmin = partnerHelper.isPartnerAdmin(authUserDetails().getAuthorities().toString());
+
+		// If not admin, check if the partner belongs to the user
+		if (!isAdmin) {
+			boolean isPartnerBelongsToUser = false;
+			for (Partner partner : partnerList) {
+				if (partner.getId().equals(certDownloadRequestDto.getPartnerId())) {
+					isPartnerBelongsToUser = true;
+					break;
+				}
+			}
+
+			if (!isPartnerBelongsToUser) {
+				LOGGER.error("sessionId", "idType", "id", "The given partner ID does not belong to the user.");
+				throw new PartnerServiceException(ErrorCode.PARTNER_DOES_NOT_BELONG_TO_THE_USER.getErrorCode(),
+						ErrorCode.PARTNER_DOES_NOT_BELONG_TO_THE_USER.getErrorMessage());
+			}
+		}
 	}
 
 	@Override
@@ -844,7 +1027,25 @@ public class PartnerServiceImpl implements PartnerService {
 			extractorProvider = new BiometricExtractorProvider();
 			extractorProvider.setPartnerId(partnerId);
 			extractorProvider.setPolicyId(policyId);
-			extractorProvider.setId(PartnerUtil.generateId());
+
+			String id = PartnerUtil.generateId();
+			int attempts = 0;
+
+			// Keep generating a new ID until a unique one is found or maxRetries is reached
+			while (extractorProviderRepository.existsById(id)) {
+				if (attempts >= maxRetries) {
+					LOGGER.error("Failed to generate unique {} (field: '{}') for entity '{}' after {} attempts", "Biometric Extractor Provider ID",
+							"id", extractorProvider.getClass().getSimpleName(), maxRetries);
+					auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.ADD_BIO_EXTRACTORS_FAILURE, partnerId, "partnerId");
+					throw new PartnerServiceException(
+							ErrorCode.UNABLE_TO_GENERATE_UNIQUE_ID.getErrorCode(),
+							String.format(ErrorCode.UNABLE_TO_GENERATE_UNIQUE_ID.getErrorMessage(), "Biometric Extractor Provider ID", "id", extractorProvider.getClass().getSimpleName(), maxRetries)
+					);
+				}
+				id = PartnerUtil.generateId();
+				attempts++;
+			}
+			extractorProvider.setId(id);
 			extractorProvider.setAttributeName(extractor.getAttributeName());
 			extractorProvider.setBiometricModality(extractor.getBiometric().split("\\[")[0]);
 			if (extractor.getBiometric().split("\\[").length > 1) {
@@ -928,6 +1129,17 @@ public class PartnerServiceImpl implements PartnerService {
 	public PageResponseDto<PartnerSearchResponseDto> searchPartner(PartnerSearchDto dto) {
 		List<PartnerSearchResponseDto> partners = new ArrayList<>();
 		PageResponseDto<PartnerSearchResponseDto> pageDto = new PageResponseDto<>();
+
+		// Exclude encrypted columns from filtering
+		for (SearchFilter filter : dto.getFilters()) {
+			validateFilterColumns(filter.getColumnName());
+		}
+
+		// Exclude encrypted columns from sorting
+		for (SearchSort sort : dto.getSort()) {
+			validateFilterColumns(sort.getSortField());
+		}
+
 		if (!dto.getPartnerType().equalsIgnoreCase(ALL)) {
 			List<SearchFilter> filters = new ArrayList<>();
 			SearchFilter partnerTypeSearch = new SearchFilter();
@@ -940,11 +1152,26 @@ public class PartnerServiceImpl implements PartnerService {
 		}
 		Page<Partner> page = partnerSearchHelper.search(Partner.class, dto, "id");
 		if (page.getContent() != null && !page.getContent().isEmpty()) {
+			// Decrypt fields
+			page.getContent().forEach(partner -> {
+				if (partner.getEmailIdHash() != null) {
+					partner.setContactNo(keyManagerHelper.decryptData(partner.getContactNo()));
+					partner.setEmailId(keyManagerHelper.decryptData(partner.getEmailId()));
+					partner.setAddress(keyManagerHelper.decryptData(partner.getAddress()));
+				}
+			});
 			partners = MapperUtils.mapAll(page.getContent(), PartnerSearchResponseDto.class);
 			pageDto = pageUtils.sortPage(partners, dto.getSort(), dto.getPagination(), page.getTotalElements());
 		}
 		auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.SEARCH_PARTNER_SUCCESS);
 		return pageDto;
+	}
+
+	private void validateFilterColumns(String columnName) {
+		if (CONTACT_NO.equalsIgnoreCase(columnName) || EMAIL_ID.equalsIgnoreCase(columnName) || ADDRESS.equalsIgnoreCase(columnName)) {
+			throw new PartnerServiceException(ErrorCode.UNSUPPORTED_COLUMN.getErrorCode(),
+					String.format(ErrorCode.UNSUPPORTED_COLUMN.getErrorMessage(), columnName));
+		}
 	}
 
 	@Override
@@ -971,6 +1198,11 @@ public class PartnerServiceImpl implements PartnerService {
 					ErrorCode.CREDENTIAL_NOT_ALLOWED_PARTNERS.getErrorMessage() + credentialTypesRequiredPartnerTypes);
 		}
 		AuthPolicy validPolicy = validatePolicyGroupAndPolicy(partner.getPolicyGroupId(), policyName);
+		if (isPartnerAlreadyMapped(partnerId, credentialType)) {
+			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.SUBMIT_API_REQUEST_FAILURE, policyName, "policyName");
+			throw new PartnerServiceException(ErrorCode.DUPLICATE_CREDENTIAL_MAPPING.getErrorCode(),
+					ErrorCode.DUPLICATE_CREDENTIAL_MAPPING.getErrorMessage());
+		}
 		PartnerPolicyCredentialType entity = new PartnerPolicyCredentialType();
 		PartnerPolicyCredentialTypePK key = new PartnerPolicyCredentialTypePK();
 		key.setCredentialType(credentialType);
@@ -984,6 +1216,11 @@ public class PartnerServiceImpl implements PartnerService {
 		partnerCredentialTypePolicyRepo.save(entity);
 		auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.MAP_POLICY_CREDENTIAL_TYPE_SUCCESS);
 		return "Partner, policy and credentialType mapping done successfully.";
+	}
+
+	private boolean isPartnerAlreadyMapped(String partnerId, String credentialType) {
+		Optional<PartnerPolicyCredentialType> existingMapping = Optional.ofNullable(partnerCredentialTypePolicyRepo.findByPartnerIdAndCrdentialType(partnerId, credentialType));
+		return existingMapping.isPresent();
 	}
 
 	private void validateCredentialTypes(String credentialType) {
@@ -1078,6 +1315,12 @@ public class PartnerServiceImpl implements PartnerService {
 	public FilterResponseCodeDto filterValues(FilterValueDto filterValueDto) {
 		FilterResponseCodeDto filterResponseDto = new FilterResponseCodeDto();
 		List<ColumnCodeValue> columnValueList = new ArrayList<>();
+
+		// Exclude encrypted columns from filtering
+		for (FilterDto filter : filterValueDto.getFilters()) {
+			validateFilterColumns(filter.getColumnName());
+		}
+
 		if(partnerSearchHelper.isLoggedInUserFilterRequired()) {
 			SearchFilter loggedInUserFilterDto = new SearchFilter();
 			loggedInUserFilterDto.setColumnName("id");
@@ -1380,7 +1623,8 @@ public class PartnerServiceImpl implements PartnerService {
 		NotificationDto dto = new NotificationDto();
 		dto.setPartnerId(partner.getId());
 		dto.setPartnerName(partner.getName());
-		dto.setEmailId(partner.getEmailId());
+		dto.setEmailId(partner.getEmailIdHash() != null ?
+				keyManagerHelper.decryptData(partner.getEmailId()) : partner.getEmailId());
 		dto.setLangCode(partner.getLangCode());
 		dto.setPartnerStatus(partner.getIsActive() == true ? PartnerConstants.ACTIVE : PartnerConstants.DEACTIVE);
 		notificationDtos.add(dto);
@@ -1538,19 +1782,303 @@ public class PartnerServiceImpl implements PartnerService {
 		partnerPolicyRequest.setStatusCode(PartnerConstants.IN_PROGRESS);
 		partnerPolicyRequest.setCrBy(getLoggedInUserId());
 		partnerPolicyRequest.setCrDtimes(Timestamp.valueOf(LocalDateTime.now()));
-		partnerPolicyRequest.setId(PartnerUtil.createPartnerPolicyRequestId());
 		partnerPolicyRequest.setPartner(partner);
 		partnerPolicyRequest.setPolicyId(authPolicy.getId());
 		partnerPolicyRequest.setRequestDatetimes(Timestamp.valueOf(LocalDateTime.now()));
 		partnerPolicyRequest.setRequestDetail(partnerAPIKeyRequest.getUseCaseDescription());
 		partnerPolicyRequest.setIsDeleted(false);
+		String id = PartnerUtil.createPartnerPolicyRequestId();
+
+		int attempts = 0;
+
+		// Keep generating new ID until a unique one is found or maxRetries is reached
+		while (partnerPolicyRequestRepository.existsById(id)) {
+			if (attempts >= maxRetries) {
+				LOGGER.error("Failed to generate unique {} (field: '{}') for entity '{}' after {} attempts", "Partner Policy Request ID",
+						"id", partnerPolicyRequest.getClass().getSimpleName(), maxRetries);
+				auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.SUBMIT_API_REQUEST_FAILURE, partnerId, "partnerId");
+				throw new PartnerServiceException(
+						ErrorCode.UNABLE_TO_GENERATE_UNIQUE_ID.getErrorCode(),
+						String.format(ErrorCode.UNABLE_TO_GENERATE_UNIQUE_ID.getErrorMessage(), "Partner Policy Request ID", "id", partnerPolicyRequest.getClass().getSimpleName(), maxRetries)
+				);
+			}
+			id = PartnerUtil.createPartnerPolicyRequestId();
+			attempts++;
+		}
+
+		partnerPolicyRequest.setId(id);
 		partnerPolicyRequestRepository.save(partnerPolicyRequest);
 		auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.SUBMIT_API_REQUEST_SUCCESS, partnerId, "partnerId");
 		response.setMappingkey(partnerPolicyRequest.getId());
 		response.setMessage("Policy mapping request submitted successfully.");
 		return response;
 	}
-	
+
+	@Override
+	public ResponseWrapperV2<List<CertificateDto>> getPartnerCertificatesDetails(Integer expiryPeriod) {
+		ResponseWrapperV2<List<CertificateDto>> responseWrapper = new ResponseWrapperV2<>();
+		try {
+			String userId = getUserId();
+			List<Partner> partnerList = partnerRepository.findByUserId(userId);
+			if (!partnerList.isEmpty()) {
+				List<CertificateDto> certificateDtoList = new ArrayList<>();
+				for (Partner partner : partnerList) {
+					CertificateDto certificateDto = new CertificateDto();
+					try {
+						if (Objects.isNull(partner.getId()) || partner.getId().equals(BLANK_STRING)) {
+							LOGGER.info("Partner Id is null or empty for user id : " + userId);
+							throw new PartnerServiceException(ErrorCode.PARTNER_ID_NOT_EXISTS.getErrorCode(),
+									ErrorCode.PARTNER_ID_NOT_EXISTS.getErrorMessage());
+						}
+						PartnerCertDownloadRequestDto requestDto = new PartnerCertDownloadRequestDto();
+						requestDto.setPartnerId(partner.getId());
+						PartnerCertDownloadResponeDto partnerCertDownloadResponeDto = getPartnerCertificate(requestDto);
+						X509Certificate cert = MultiPartnerUtil.decodeCertificateData(partnerCertDownloadResponeDto.getCertificateData());
+						if (Objects.nonNull(expiryPeriod)) {
+							LocalDateTime certExpiryDateTime = cert.getNotAfter().toInstant().atZone(ZoneId.systemDefault()).toLocalDateTime();
+							LocalDateTime validTillDateTime = LocalDateTime.now().plusDays(expiryPeriod).with(LocalTime.MAX);
+
+							// Skip certificates that are already expired or expire beyond the expiry period
+							if (certExpiryDateTime.isBefore(LocalDateTime.now()) || certExpiryDateTime.isAfter(validTillDateTime)) {
+								continue;
+							}
+						}
+                        certificateDto.setIsCertificateAvailable(true);
+						certificateDto.setCertificateIssuedTo(PartnerUtil.getCertificateName(cert.getSubjectDN().getName()));
+						certificateDto.setCertificateUploadDateTime(cert.getNotBefore());
+						certificateDto.setCertificateExpiryDateTime(cert.getNotAfter());
+						certificateDto.setPartnerId(partner.getId());
+						certificateDto.setPartnerType(partner.getPartnerTypeCode());
+					} catch (PartnerServiceException ex) {
+						if (Objects.nonNull(expiryPeriod)) {
+							continue;
+						}
+						LOGGER.info("Could not fetch partner certificate :" + ex.getMessage());
+						certificateDto.setIsCertificateAvailable(false);
+						certificateDto.setPartnerId(partner.getId());
+						certificateDto.setPartnerType(partner.getPartnerTypeCode());
+					}
+					if (partner.getApprovalStatus().equals(APPROVED) && !partner.getIsActive()) {
+						certificateDto.setIsPartnerActive(false);
+					} else {
+						certificateDto.setIsPartnerActive(true);
+					}
+					certificateDtoList.add(certificateDto);
+				}
+				responseWrapper.setResponse(certificateDtoList);
+			} else {
+				LOGGER.info("sessionId", "idType", "id", "User id does not exists.");
+				throw new PartnerServiceException(ErrorCode.USER_ID_NOT_EXISTS.getErrorCode(),
+						ErrorCode.USER_ID_NOT_EXISTS.getErrorMessage());
+			}
+		} catch (PartnerServiceException ex) {
+			LOGGER.info("sessionId", "idType", "id", "In getPartnerCertificatesDetails method of PartnerServiceImpl - " + ex.getMessage());
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(ex.getErrorCode(), ex.getErrorText()));
+		} catch (ApiAccessibleException ex) {
+			LOGGER.info("sessionId", "idType", "id", "In getPartnerCertificates method of PartnerServiceImpl - " + ex.getMessage());
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(ex.getErrorCode(), ex.getErrorText()));
+		} catch (Exception ex) {
+			LOGGER.debug("sessionId", "idType", "id", ex.getStackTrace());
+			LOGGER.error("sessionId", "idType", "id",
+					"In getPartnerCertificatesDetails method of PartnerServiceImpl - " + ex.getMessage());
+			String errorCode = ErrorCode.PARTNER_CERTIFICATES_FETCH_ERROR.getErrorCode();
+			String errorMessage = ErrorCode.PARTNER_CERTIFICATES_FETCH_ERROR.getErrorMessage();
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(errorCode, errorMessage));
+		}
+		responseWrapper.setId(getPartnerCertificatesId);
+		responseWrapper.setVersion(VERSION);
+		return responseWrapper;
+	}
+
+	@Override
+	public ResponseWrapperV2<List<PartnerDtoV3>> getPartnersV3(String status, Boolean policyGroupAvailable, String partnerType) {
+		ResponseWrapperV2<List<PartnerDtoV3>> responseWrapper = new ResponseWrapperV2<>();
+		try {
+			String userId = getUserId();
+			boolean isPartnerAdmin = partnerHelper.isPartnerAdmin(authUserDetails().getAuthorities().toString());
+			List<Partner> partners = new ArrayList<>();
+			// if not MISP_Partner type, fetch partners for logged in user
+			if (!PartnerConstants.MISP_PARTNER_TYPE.equals(partnerType)) {
+				List<Partner> partnerList = partnerRepository.findByUserId(userId);
+				if (partnerList.isEmpty()) {
+					LOGGER.info("sessionId", "idType", "id", "User id does not exists.");
+					throw new PartnerServiceException(ErrorCode.USER_ID_NOT_EXISTS.getErrorCode(),
+							ErrorCode.USER_ID_NOT_EXISTS.getErrorMessage());
+				}
+				partners = partnerRepository.findPartnersByUserIdAndStatusAndPartnerTypeAndPolicyGroupAvailable(status, userId, partnerType, policyGroupAvailable);
+			}
+			// if MISP_Partner type and Partner_Admin, fetch all MISP partners
+			else {
+				if (!isPartnerAdmin) {
+					LOGGER.info("sessionId", "idType", "id", "Only Partner Admin can fetch all MISP partners.");
+					throw new PartnerServiceException(ErrorCode.UNABLE_TO_FETCH_MISP_PARTNERS_LIST.getErrorCode(),
+							ErrorCode.UNABLE_TO_FETCH_MISP_PARTNERS_LIST.getErrorMessage());
+				}
+				partners = partnerRepository.findPartnersByStatusAndPartnerTypeAndPolicyGroupAvailable(status, partnerType, policyGroupAvailable);
+			}
+			List<PartnerDtoV3> partnerDtoV3List = new ArrayList<>();
+			for (Partner partner : partners) {
+				PartnerDtoV3 partnerDtoV3 = new PartnerDtoV3();
+				partnerHelper.validatePartnerId(partner, userId);
+				partnerDtoV3.setPartnerId(partner.getId());
+				partnerDtoV3.setPartnerType(partner.getPartnerTypeCode());
+				if (partner.getPolicyGroupId() != null) {
+					try {
+						PolicyGroup policyGroup = partnerHelper.validatePolicyGroup(partner);
+						partnerDtoV3.setPolicyGroupId(partner.getPolicyGroupId());
+						partnerDtoV3.setPolicyGroupName(policyGroup.getName());
+						partnerDtoV3.setPolicyGroupDescription(policyGroup.getDesc());
+					} catch (PartnerServiceException ex) {
+						LOGGER.error("The policy group assigned to this partner does not exist for partner ID:: " + partner.getId());
+					}
+				}
+				partnerDtoV3List.add(partnerDtoV3);
+			}
+			responseWrapper.setResponse(partnerDtoV3List);
+		} catch (PartnerServiceException ex) {
+			LOGGER.info("sessionId", "idType", "id", "In getPartnersV3 method of PartnerServiceImpl - " + ex.getMessage());
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(ex.getErrorCode(), ex.getErrorText()));
+		} catch (Exception ex) {
+			LOGGER.debug("sessionId", "idType", "id", ex.getStackTrace());
+			LOGGER.error("sessionId", "idType", "id",
+					"In getPartnersV3 method of PartnerServiceImpl - " + ex.getMessage());
+			String errorCode = ErrorCode.PARTNERS_FETCH_ERROR.getErrorCode();
+			String errorMessage = ErrorCode.PARTNERS_FETCH_ERROR.getErrorMessage();
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(errorCode, errorMessage));
+		}
+		responseWrapper.setId(getPartnersV3Id);
+		responseWrapper.setVersion(VERSION);
+		return responseWrapper;
+	}
+
+	@Override
+	public ResponseWrapperV2<PartnerResponse> createPartner(PartnerRequest partnerRequest) {
+		ResponseWrapperV2<PartnerResponse> responseWrapper = new ResponseWrapperV2<>();
+		try {
+			boolean isAdmin = partnerHelper.isPartnerAdmin(authUserDetails().getAuthorities().toString());
+			String partnerEmail = isAdmin ? partnerRequest.getEmailId() : getLoggedInUserEmail();
+
+			if (!validateEmail(partnerEmail)) {
+				auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, partnerRequest.getPartnerId(),
+						"partnerId");
+				throw new PartnerServiceException(ErrorCode.INVALID_EMAIL_ID_EXCEPTION.getErrorCode(),
+						ErrorCode.INVALID_EMAIL_ID_EXCEPTION.getErrorMessage());
+			}
+
+			if (!validatePartnerByEmail(partnerEmail)) {
+				auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, partnerRequest.getPartnerId(),
+						"partnerId");
+				throw new PartnerServiceException(ErrorCode.EMAIL_ALREADY_EXISTS_EXCEPTION.getErrorCode(),
+						ErrorCode.EMAIL_ALREADY_EXISTS_EXCEPTION.getErrorMessage());
+			}
+
+			PartnerResponse partnerResponse = validateAndSavePartner(mapToPartnerRequestDto(partnerRequest));
+			responseWrapper.setResponse(partnerResponse);
+		} catch (PartnerServiceException ex) {
+			LOGGER.info("sessionId", "idType", "id", "In createPartner method of PartnerServiceImpl - " + ex.getMessage());
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(ex.getErrorCode(), ex.getErrorText()));
+		} catch (Exception ex) {
+			LOGGER.error("sessionId", "idType", "id", "In createPartner method of PartnerServiceImpl - " + ex.getMessage(), ex);
+			auditUtil.setAuditRequestDto(PartnerServiceAuditEnum.REGISTER_PARTNER_FAILURE, partnerRequest.getPartnerId(), "partnerId");
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(
+					ErrorCode.PARTNER_CREATE_ERROR.getErrorCode(),
+					ErrorCode.PARTNER_CREATE_ERROR.getErrorMessage()));
+		}
+		responseWrapper.setId(postCreatePartnerId);
+		responseWrapper.setVersion(VERSION);
+		return responseWrapper;
+	}
+
+	private PartnerRequestDto mapToPartnerRequestDto(PartnerRequest request) {
+		PartnerRequestDto dto = new PartnerRequestDto();
+		dto.setAddress(request.getAddress());
+		dto.setContactNumber(request.getContactNumber());
+		dto.setEmailId(request.getEmailId());
+		dto.setLangCode(request.getLangCode());
+		dto.setOrganizationName(request.getOrganizationName());
+		dto.setPartnerId(request.getPartnerId());
+		dto.setPartnerType(request.getPartnerType());
+		dto.setPolicyGroup(request.getPolicyGroup());
+		return dto;
+	}
+
+	@Override
+	public ResponseWrapperV2<PartnerExistsResponseDto> checkPartnerExists(PartnerExistsRequestDto request) {
+		ResponseWrapperV2<PartnerExistsResponseDto> responseWrapper = new ResponseWrapperV2<>();
+		responseWrapper.setId(postPartnerExistsId);
+		responseWrapper.setVersion(VERSION);
+		PartnerExistsResponseDto response = new PartnerExistsResponseDto();
+
+		try {
+			String emailId = request.getEmailId();
+			String partnerId = request.getPartnerId();
+			PartnerType partnerTypeCode = validateAndGetPartnerType(request.getPartnerType());
+			String partnerType = partnerTypeCode.getCode();
+
+			LOGGER.info("Starting email verification for emailId: {}", emailId);
+
+			// Find partner by email (hash first, fallback to plain for backward compatibility)
+			String emailHash = PartnerUtil.generateSHA256Hash(emailId);
+			Partner partnerByEmail = partnerRepository.findByEmailIdHash(emailHash);
+			if (partnerByEmail == null) {
+				partnerByEmail = partnerRepository.findByEmailId(emailId);
+			}
+
+			response.setPartnerExists(false);
+
+			if (partnerByEmail != null) {
+				// Email exists
+				response.setPartnerExists(true);
+				// check if both partnerId and partnerType match existing record
+				if (!partnerByEmail.getId().equals(partnerId) || !partnerByEmail.getPartnerTypeCode().equals(partnerType)) {
+
+					LOGGER.error("Email conflict detected. Existing partnerId: {}, requested partnerId: {}, " +
+									"existing partnerType: {}, requested partnerType: {}",
+							partnerByEmail.getId(), partnerId,
+							partnerByEmail.getPartnerTypeCode(), partnerType);
+
+					response.setDuplicateExists(true);
+					response.setMessage(ErrorCode.EMAIL_PARTNER_CONFLICT.getErrorMessage());
+					responseWrapper.setResponse(response);
+					return responseWrapper;
+				}
+
+			} else {
+				// Email doesn't exist → check if partnerId already exists
+				LOGGER.info("Email does not exist. Checking if partnerId already exists: {}", partnerId);
+				if (partnerRepository.findById(partnerId).isPresent()) {
+					LOGGER.error("Partner ID conflict detected. PartnerId already exists: {}", partnerId);
+					response.setPartnerExists(true);
+					response.setDuplicateExists(true);
+					response.setMessage(ErrorCode.PARTNER_ALREADY_REGISTERED_EXCEPTION.getErrorMessage());
+					responseWrapper.setResponse(response);
+					return responseWrapper;
+				}
+			}
+
+			LOGGER.info("Email verification successful.");
+
+			// Collect policy required partner types
+			List<String> requiredPartnerTypes = getAllPartnerTypes().stream()
+					.filter(PartnerType::getIsPolicyRequired)
+					.map(pt -> pt.getCode().toUpperCase())
+					.collect(Collectors.toList());
+
+			response.setPolicyRequiredPartnerTypes(requiredPartnerTypes);
+
+			responseWrapper.setResponse(response);
+		} catch (PartnerServiceException ex) {
+			LOGGER.info("sessionId", "idType", "id", "In checkPartnerExists method of PartnerServiceImpl - {}", ex.getMessage());
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(ex.getErrorCode(), ex.getErrorText()));
+		} catch (Exception ex) {
+			LOGGER.error("sessionId", "idType", "id", "In checkPartnerExists method of PartnerServiceImpl - {}", ex.getMessage(), ex);
+			responseWrapper.setErrors(MultiPartnerUtil.setErrorResponse(
+					ErrorCode.PARTNER_VERIFICATION_ERROR.getErrorCode(),
+					ErrorCode.PARTNER_VERIFICATION_ERROR.getErrorMessage()));
+		}
+		return responseWrapper;
+	}
+
 	/**
 	 * validates the loggedInUser authorization
 	 * @param loggedInUserId
@@ -1618,5 +2146,14 @@ public class PartnerServiceImpl implements PartnerService {
 		updateRequest.setAdditionalInfo(null);
 		updateRequest.setLogoUrl(null);	
 		return updatePartnerDetails(updateRequest, partnerId);
+	}
+
+	private AuthUserDetails authUserDetails() {
+		return (AuthUserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+	}
+
+	private String getUserId() {
+		String userId = authUserDetails().getUserId();
+		return userId;
 	}
 }

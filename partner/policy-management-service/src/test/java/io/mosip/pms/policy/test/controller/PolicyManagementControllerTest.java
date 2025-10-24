@@ -2,6 +2,8 @@ package io.mosip.pms.policy.test.controller;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -18,7 +20,11 @@ import java.util.List;
 
 import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.databind.JsonMappingException;
-import io.mosip.pms.common.repository.AuthPolicyRepository;
+import io.mosip.pms.common.dto.*;
+import io.mosip.pms.common.request.dto.RequestWrapperV2;
+import io.mosip.pms.common.response.dto.ResponseWrapperV2;
+import io.mosip.pms.common.util.RequestValidator;
+import io.mosip.pms.common.validator.InputValidator;
 import io.mosip.pms.policy.controller.PolicyManagementController;
 import io.mosip.pms.policy.dto.*;
 import io.mosip.pms.policy.errorMessages.ServiceError;
@@ -32,6 +38,7 @@ import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.TestPropertySource;
@@ -44,22 +51,13 @@ import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import io.mosip.pms.common.dto.FilterDto;
-import io.mosip.pms.common.dto.FilterValueDto;
-import io.mosip.pms.common.dto.PageResponseDto;
-import io.mosip.pms.common.dto.Pagination;
-import io.mosip.pms.common.dto.PolicyFilterValueDto;
-import io.mosip.pms.common.dto.PolicySearchDto;
-import io.mosip.pms.common.dto.SearchAuthPolicy;
-import io.mosip.pms.common.dto.SearchDto;
-import io.mosip.pms.common.dto.SearchFilter;
-import io.mosip.pms.common.dto.SearchSort;
 import io.mosip.pms.common.entity.PolicyGroup;
 import io.mosip.pms.common.validator.FilterColumnValidator;
 import io.mosip.pms.policy.errorMessages.PolicyManagementServiceException;
 import io.mosip.pms.policy.service.PolicyManagementService;
 import io.mosip.pms.policy.test.PolicyServiceTest;
 import io.mosip.pms.policy.util.AuditUtil;
+import org.mockito.Mockito;
 
 /**
  * @author Nagarjuna Kuchi
@@ -70,7 +68,6 @@ import io.mosip.pms.policy.util.AuditUtil;
 @SpringBootTest(classes = PolicyServiceTest.class)
 @AutoConfigureMockMvc
 @EnableWebMvc
-@TestPropertySource("classpath:application.properties")
 public class PolicyManagementControllerTest {
 	
 	@Autowired
@@ -80,19 +77,23 @@ public class PolicyManagementControllerTest {
 	private PolicyManagementService policyManagementService;
 	
 	@Autowired
-	private ObjectMapper objectMapper;	
+	private ObjectMapper objectMapper;
 	
 	@Mock
 	FilterColumnValidator filterColumnValidator;
 	
 	@Mock
 	private AuditUtil audit;
+
+	@Mock
+	private RequestValidator requestValidator;
+
+	@Mock
+	InputValidator inputValidator;
+
 	@InjectMocks
 	PolicyManagementController policyManagementController;
 
-	@Mock
-	AuthPolicyRepository authPolicyRepository;
-	
 	FilterDto filterDto = new FilterDto();
 	SearchFilter searchFilter = new SearchFilter();
 	FilterValueDto filterValueDto = new FilterValueDto();
@@ -101,7 +102,7 @@ public class PolicyManagementControllerTest {
 	Pagination pagination = new Pagination();
 	SearchSort searchSort = new SearchSort();
 	SearchDto searchDto = new SearchDto();
-	
+
 	@Before
 	public void setUp() {
 		//ReflectionTestUtils.setField(policyManagementService, "filterColumnValidator", filterColumnValidator);
@@ -130,50 +131,50 @@ public class PolicyManagementControllerTest {
     	searchDto.setSort(searchDtos1);
     	pagination.setPageFetch(10);
     	pagination.setPageStart(0);
-    	
+
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void getValueForKeyTest() throws PolicyManagementServiceException, Exception{
 		mockMvc.perform(MockMvcRequestBuilders.get("/policies/config/12345")).
 		andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void getPolicyGroups() throws PolicyManagementServiceException, Exception{
 		mockMvc.perform(MockMvcRequestBuilders.get("/policies/group/all")).
 		andExpect(MockMvcResultMatchers.status().isOk());
 	}
-		
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void getPolicyGroupTest() throws Exception{
 		PolicyWithAuthPolicyDto response = new PolicyWithAuthPolicyDto();
 		Mockito.when(policyManagementService.getPolicyGroupPolicy(Mockito.any())).thenReturn(response);
 		mockMvc.perform(MockMvcRequestBuilders.get("/policies/group/12345")).
-		andExpect(MockMvcResultMatchers.status().isOk());		
+		andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void getPartnersPolicyTest() throws Exception{
 		PolicyResponseDto response = new PolicyResponseDto();
 		Mockito.when(policyManagementService.getPartnerMappedPolicy(Mockito.any(),Mockito.any())).thenReturn(response);
 		mockMvc.perform(MockMvcRequestBuilders.get("/policies/12345/partner/12345")).
-		andExpect(MockMvcResultMatchers.status().isOk());		
+		andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void publishPolicyTest() throws Exception{
 		PolicyResponseDto response = new PolicyResponseDto();
 		Mockito.when(policyManagementService.publishPolicy(Mockito.any(),Mockito.any())).thenReturn(response);
 		mockMvc.perform(MockMvcRequestBuilders.post("/policies/12345/group/12345/publish")).
-		andExpect(MockMvcResultMatchers.status().isOk());		
+		andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void searchPolicy() throws PolicyManagementServiceException, Exception{
@@ -183,7 +184,7 @@ public class PolicyManagementControllerTest {
 		 mockMvc.perform(post("/policies/search").contentType(MediaType.APPLICATION_JSON_VALUE)
 	                .content(objectMapper.writeValueAsString(policySearchDto))).andExpect(status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void searchPolicyGroup() throws PolicyManagementServiceException, Exception{
@@ -193,7 +194,7 @@ public class PolicyManagementControllerTest {
 		 mockMvc.perform(post("/policies/group/search").contentType(MediaType.APPLICATION_JSON_VALUE)
 	                .content(objectMapper.writeValueAsString(policyGroupSearchDto))).andExpect(status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void policyGroupFilterValuesTest() throws PolicyManagementServiceException, Exception{
@@ -202,9 +203,9 @@ public class PolicyManagementControllerTest {
 		RequestWrapper<FilterValueDto> policyGroupFilterValueDto = createPolicyGFilterRequest();
 		 mockMvc.perform(post("/policies/group/filtervalues").contentType(MediaType.APPLICATION_JSON_VALUE)
 	                .content(objectMapper.writeValueAsString(policyGroupFilterValueDto))).andExpect(status().isOk());
-		
+
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void policyFilterValuesTest() throws PolicyManagementServiceException, Exception{
@@ -214,7 +215,7 @@ public class PolicyManagementControllerTest {
 		 mockMvc.perform(post("/policies/filtervalues").contentType(MediaType.APPLICATION_JSON_VALUE)
 	                .content(objectMapper.writeValueAsString(policyFilterValueDto))).andExpect(status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void policyGroupCreationTest() throws PolicyManagementServiceException, Exception{
@@ -224,7 +225,7 @@ public class PolicyManagementControllerTest {
 		mockMvc.perform(post("/policies/group/new").contentType(MediaType.APPLICATION_JSON_VALUE)
                 .content(objectMapper.writeValueAsString(request))).andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void policyCreationTest() throws PolicyManagementServiceException, Exception{
@@ -234,66 +235,67 @@ public class PolicyManagementControllerTest {
 		mockMvc.perform(post("/policies").contentType(MediaType.APPLICATION_JSON_VALUE)
                 .content(objectMapper.writeValueAsString(request))).andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void updatePolicyGroupTest() throws Exception{
 		PolicyGroupCreateResponseDto response = new PolicyGroupCreateResponseDto();
 		Mockito.when(policyManagementService.updatePolicyGroup(Mockito.any(),Mockito.any())).thenReturn(response);
 		RequestWrapper<PolicyGroupUpdateRequestDto> request = createPolicyGroupUpdateRequest();
-		
+
 		mockMvc.perform(put("/policies/group/12345").contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request))).andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void updatePolicyTest() throws Exception{
 		PolicyCreateResponseDto response = new PolicyCreateResponseDto();
 		Mockito.when(policyManagementService.updatePolicies(Mockito.any(),Mockito.any())).thenReturn(response);
 		RequestWrapper<PolicyUpdateRequestDto> request = createPolicyUpdateRequest();
-		
+
 		mockMvc.perform(put("/policies/12345").contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request))).andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void updatePolicyStatus() throws JsonProcessingException, Exception{
 		ResponseWrapper<PolicyStatusUpdateResponseDto> response = new ResponseWrapper<>();
 		Mockito.when(policyManagementService.updatePolicyStatus(Mockito.any(),Mockito.any(),Mockito.any())).thenReturn(response);
 		RequestWrapper<PolicyStatusUpdateRequestDto> request = createPolicyStatusUpateRequest();
-		
+
+		policyManagementController.updatePolicyStatus(request, "12345", "12345");
 		mockMvc.perform(MockMvcRequestBuilders.patch("/policies/12345/group/12345").contentType(MediaType.APPLICATION_JSON_VALUE)
     			.content(objectMapper.writeValueAsString(request))).andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void getPoliciesTest() throws Exception{
 		mockMvc.perform(MockMvcRequestBuilders.get("/policies")).
 		andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void getPolicyTest() throws Exception{
 		PolicyResponseDto response = new PolicyResponseDto();
 		Mockito.when(policyManagementService.findPolicy(Mockito.any())).thenReturn(response);
-		
+
 		mockMvc.perform(MockMvcRequestBuilders.get("/policies/12345")).
-		andExpect(MockMvcResultMatchers.status().isOk());		
+		andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	@Test
 	@WithMockUser(roles = {"POLICYMANAGER"})
 	public void getPoliciesByGroupName() throws Exception{
 		List<PolicyDetailsDto> response = new ArrayList<>();
-		Mockito.when(policyManagementService.getActivePolicyDetailsByGroupName(Mockito.any())).thenReturn(response);		
+		Mockito.when(policyManagementService.getActivePolicyDetailsByGroupName(Mockito.any())).thenReturn(response);
 		mockMvc.perform(MockMvcRequestBuilders.get("/policies/active/group/12345")).
-		andExpect(MockMvcResultMatchers.status().isOk());		
+		andExpect(MockMvcResultMatchers.status().isOk());
 	}
-	
+
 	private RequestWrapper<PolicyStatusUpdateRequestDto> createPolicyStatusUpateRequest() {
 		RequestWrapper<PolicyStatusUpdateRequestDto> request = new RequestWrapper<PolicyStatusUpdateRequestDto>();
 		request.setRequest(createPolicyStatusUpdateRequest());
@@ -325,7 +327,7 @@ public class PolicyManagementControllerTest {
         request.setMetadata("{}");
         return request;
 	}
-	
+
 	private RequestWrapper<PolicyGroupUpdateRequestDto> createPolicyGroupUpdateRequest() {
 		RequestWrapper<PolicyGroupUpdateRequestDto> request = new RequestWrapper<PolicyGroupUpdateRequestDto>();
 		PolicyGroupUpdateRequestDto updateRequest = new PolicyGroupUpdateRequestDto();
@@ -349,14 +351,14 @@ public class PolicyManagementControllerTest {
         request.setMetadata("{}");
         return request;
 	}
-	
+
 	private PolicyGroupCreateRequestDto createPolicyGRequest() {
 		PolicyGroupCreateRequestDto requestDto = new PolicyGroupCreateRequestDto();
 		requestDto.setName("PolicyName");
 		requestDto.setDesc("PolicyDesc");
 		return requestDto;
 	}
-	
+
 	private RequestWrapper<PolicyCreateRequestDto> createPolicyRequest() {
 		RequestWrapper<PolicyCreateRequestDto> request = new RequestWrapper<PolicyCreateRequestDto>();
 		request.setRequest(createPolicyyRequest());
@@ -366,7 +368,7 @@ public class PolicyManagementControllerTest {
         request.setMetadata("{}");
         return request;
 	}
-	
+
 	private PolicyCreateRequestDto createPolicyyRequest() {
 		JSONObject policies = null;
 		PolicyCreateRequestDto requestDto = new PolicyCreateRequestDto();
@@ -379,8 +381,8 @@ public class PolicyManagementControllerTest {
 		requestDto.setPolicies(policies);
 		return requestDto;
 	}
-	
-	
+
+
 	private RequestWrapper<PolicySearchDto> createPolicySearchhRequest() {
 		RequestWrapper<PolicySearchDto> request = new RequestWrapper<PolicySearchDto>();
 		request.setRequest(createPolicySearchRequest());
@@ -417,7 +419,7 @@ public class PolicyManagementControllerTest {
     	requestDto.setPagination(pagination);
 		return requestDto;
 	}
-	
+
 	private RequestWrapper<SearchDto> createPolicyGroupSearchhRequest() {
 		RequestWrapper<SearchDto> request = new RequestWrapper<SearchDto>();
 		request.setRequest(createPolicyGroupSearchRequest());
@@ -450,7 +452,7 @@ public class PolicyManagementControllerTest {
     	requestDto.setPagination(pagination);
 		return requestDto;
 	}
-	
+
 	private RequestWrapper<FilterValueDto> createPolicyGFilterRequest() {
 		RequestWrapper<FilterValueDto> request = new RequestWrapper<FilterValueDto>();
 		request.setRequest(createPolicyGroupFilterRequest());
@@ -460,9 +462,9 @@ public class PolicyManagementControllerTest {
         request.setMetadata("{}");
         return request;
 	}
-	
+
 	/**
-	 * 
+	 *
 	 * @return
 	 */
 	private FilterValueDto createPolicyGroupFilterRequest() {
@@ -487,9 +489,9 @@ public class PolicyManagementControllerTest {
     	filterValueDto.setFilters(filterDtos);
     	return filterValueDto;
 	}
-	
+
 	/**
-	 * 
+	 *
 	 * @return
 	 */
 	private RequestWrapper<PolicyFilterValueDto> createPolicyFilterrRequest() {
@@ -501,9 +503,9 @@ public class PolicyManagementControllerTest {
         request.setMetadata("{}");
         return request;
 	}
-	
+
 	/**
-	 * 
+	 *
 	 * @return
 	 */
 	private PolicyFilterValueDto createPolicyFilterRequest() {
@@ -543,6 +545,7 @@ public class PolicyManagementControllerTest {
 		assertNotNull(response);
 		assertNotNull(response.getResponse());
 		assertEquals(mockedResponseDto, response.getResponse());
+		verify(requestValidator).validateReqTime(requestWrapper.getRequesttime());
 		verify(audit).setAuditRequestDto(PolicyManageEnum.CREATE_POLICY_GROUP, createRequestDto.getName(), "policyGroupName");
 	}
 	@Test
@@ -814,4 +817,83 @@ public class PolicyManagementControllerTest {
 		assertNotNull(response.getResponse());
 		assertEquals(mockedResponse, response.getResponse());
 	}
+
+	@Test
+	public void getAllPoliciesTest() throws Exception {
+		String sortFieldName = "createdDateTime";
+		String sortType = "desc";
+		int pageNo = 0;
+		int pageSize = 8;
+		PolicyFilterDto filterDto = new PolicyFilterDto();
+		filterDto.setPolicyId("123");
+		filterDto.setPolicyType("Auth");
+		filterDto.setPolicyName("abc");
+		filterDto.setPolicyDescription("desc");
+		filterDto.setPolicyGroupName("default");
+		ResponseWrapperV2<PageResponseV2Dto<PolicySummaryDto>> responseWrapper = new ResponseWrapperV2<>();
+
+		doNothing().when(inputValidator).validateRequestInput(any());
+		Mockito.when(policyManagementService.getAllPolicies(sortFieldName, sortType, pageNo, pageSize, filterDto))
+				.thenReturn(responseWrapper);
+		ResponseWrapperV2<PageResponseV2Dto<PolicySummaryDto>> response = policyManagementController.getAllPolicies(sortFieldName, sortType, pageNo, pageSize,"Auth","123", "abc", "desc", "default", "activated");
+	}
+
+	@Test
+	public void getAllPoliciesTest_WithoutFilters() throws Exception {
+		String sortFieldName = "createdDateTime";
+		String sortType = "desc";
+		int pageNo = 0;
+		int pageSize = 8;
+		PolicyFilterDto filterDto = new PolicyFilterDto();
+		filterDto.setPolicyId("123");
+		filterDto.setPolicyType("Auth");
+		filterDto.setPolicyName("abc");
+		filterDto.setPolicyDescription("desc");
+		filterDto.setPolicyGroupName("default");
+		ResponseWrapperV2<PageResponseV2Dto<PolicySummaryDto>> responseWrapper = new ResponseWrapperV2<>();
+
+		doNothing().when(inputValidator).validateRequestInput(any());
+		Mockito.when(policyManagementService.getAllPolicies(sortFieldName, sortType, pageNo, pageSize, filterDto))
+				.thenReturn(responseWrapper);
+		ResponseWrapperV2<PageResponseV2Dto<PolicySummaryDto>> response = policyManagementController.getAllPolicies(null, null, pageNo, pageSize, null, null, null, null, null, null);
+	}
+
+	@Test
+	public void deactivatePolicyTest() throws Exception {
+		RequestWrapperV2<DeactivateRequestDto> requestWrapper = new RequestWrapperV2<>();
+		DeactivateRequestDto requestDto = new DeactivateRequestDto();
+		requestDto.setStatus("De-Activate");
+		requestWrapper.setRequest(requestDto);
+
+		ResponseWrapperV2<DeactivatePolicyResponseDto> responseWrapper = new ResponseWrapperV2<>();
+		DeactivatePolicyResponseDto deactivatePolicyResponseDto = new DeactivatePolicyResponseDto();
+		responseWrapper.setResponse(deactivatePolicyResponseDto);
+
+		Mockito.when(policyManagementService.deactivatePolicy(anyString(), any()))
+				.thenReturn(responseWrapper);
+		policyManagementController.deactivatePolicy("12345", requestWrapper);
+		mockMvc.perform(MockMvcRequestBuilders.patch("/policies/12345").contentType(MediaType.APPLICATION_JSON_VALUE)
+				.content(objectMapper.writeValueAsString(requestWrapper))).andExpect(status().isOk());
+
+	}
+
+	@Test
+	public void deactivatePolicyGroupTest() throws Exception {
+		RequestWrapperV2<DeactivateRequestDto> requestWrapper = new RequestWrapperV2<>();
+		DeactivateRequestDto requestDto = new DeactivateRequestDto();
+		requestDto.setStatus("De-Activate");
+		requestWrapper.setRequest(requestDto);
+
+		ResponseWrapperV2<DeactivatePolicyGroupResponseDto> responseWrapper = new ResponseWrapperV2<>();
+		DeactivatePolicyGroupResponseDto deactivatePolicyGroupResponseDto = new DeactivatePolicyGroupResponseDto();
+		responseWrapper.setResponse(deactivatePolicyGroupResponseDto);
+
+		Mockito.when(policyManagementService.deactivatePolicyGroup(anyString(), any())).thenReturn(responseWrapper);
+
+		policyManagementController.deactivatePolicyGroup("12345", requestWrapper);
+		mockMvc.perform(MockMvcRequestBuilders.patch("/policies/group/12345").contentType(MediaType.APPLICATION_JSON_VALUE)
+				.content(objectMapper.writeValueAsString(requestWrapper))).andExpect(status().isOk());
+
+	}
+
 }
